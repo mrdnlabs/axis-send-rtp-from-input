@@ -3,12 +3,15 @@
 Scope: `app/lineinrtp.c` (1,769 lines), `app/html/index.html`, `app/manifest.json`, `Makefile`, `Dockerfile`, `tools/listen_rtp.py` at commit `a4fa002` (v1.4.1).
 Method: I read every file. Nothing was built or run on a device, so the findings marked *verify* are inferred from the code and the PipeWire, ACAP and RTP specs.
 
-## Status in 1.5.0
+## Status
 
-- **Fixed:** H1, H2, H3 and M9. M10 is fixed for the settings page: saves are confirmed by revision.
-- **Not yet verified on a device:** the VAPIX read of AlarmLevel and PipeWire recovery.
-- **Open:** everything else below.
+- **1.5.0:** H1, H2, H3 and M9 fixed. M10 is fixed for the settings page: saves are confirmed by revision.
 - **1.6.0:** H1 and M5's scale concern are gone. The app now owns its threshold in dBFS (`ThresholdDb`) and no longer depends on the device's Audio detection level, so the VAPIX reader was removed.
+- **1.7.0:** M1, M2, M3, M4, M7, M8, L1, L2, L4, L5, L7 and L8 fixed, with host unit tests for each where the logic allows (`tests/`). The gate state machine, RTP header state, A-law encoder, validation and the decimation filter now live in `app/rtpcore.c`. Also fixed: disabling the app or losing capture during the activation delay left the gate "pending", and re-enabling skipped the delay.
+- **1.7.0 page:** polling halved to 2 per second and paused while the tab is hidden, each poll asks only for new history (L6), every request has a timeout so one unanswered request can't freeze the page, and a slow save is waited out for 30 s instead of being reported as failed after 8 s. The app keeps 41 s of history so the chart is full on first load, and skips re-writing unchanged string settings on save. History entries are 20 ms instead of 100 ms, and the page's preview is a port of gate_step() run at the app's 10 ms tick, checked against the C code in CI. The page also has a dark theme, sliders that reach each setting's full range, port validation, and one notice per error with its source.
+- **1.7.0 codec:** a Codec setting adds L16 (uncompressed 16-bit PCM, mono) at 16 or 48 kHz alongside G.711, for music. AXIS Audio Manager Pro accepts both L16 rates as an RTP source. 48 kHz uses 10 ms packets so each stays in one Ethernet frame. The resampling filter takes any output rate, the RTP header carries the configured payload type and clock, and a codec change starts a new SSRC. `tools/listen_rtp.py` decodes L16 and can record the stream to a WAV file (`--wav`) to compare it with the source.
+- **Not yet verified on a device:** PipeWire recovery (1.5.0), and in 1.7.0 the CPU cost of the 289-tap filter on the C8110 (about 2.3 million multiply-adds per second) and the new error clearing.
+- **Open:** M5 (single-buffer peak; the dBFS threshold fixes its scale, not its dips), M6 (port numbering), L3 (version in the README is updated by hand), L9 (max-on doesn't apply to Always on or Test tone, which is probably intended) and L10.
 
 ## Summary
 

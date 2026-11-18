@@ -16,7 +16,7 @@
             "vendor": "dnicholl.axis@gmail.com",
             "vendorId": "6ee443117c",
             "runMode": "respawn",
-            "version": "1.6.1",
+            "version": "1.7.0",
             "compatibleOsVersions": [
                 {
                     "min": "12.11.72",
@@ -77,7 +77,7 @@
                 {
                     "name": "MarginDb",
                     "default": "6",
-                    "type": "int:0,40"
+                    "type": "int:0,90"
                 },
                 {
                     "name": "ActivationDelayMs",
@@ -98,6 +98,21 @@
                     "name": "InputNode",
                     "default": "AudioDevice0Input0.Unprocessed",
                     "type": "string"
+                },
+                {
+                    "name": "Codec",
+                    "default": "pcma",
+                    "type": "string"
+                },
+                {
+                    "name": "SampleRate",
+                    "default": "48000",
+                    "type": "int:16000,48000"
+                },
+                {
+                    "name": "PayloadType",
+                    "default": "96",
+                    "type": "int:96,127"
                 }
             ]
         }

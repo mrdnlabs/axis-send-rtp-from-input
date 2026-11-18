@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: Unit tests (${{ matrix.cc }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: C tests
+        run: make -C tests CC=${{ matrix.cc }}
+      - name: C tests with sanitizers
+        run: make -C tests clean test CC=${{ matrix.cc }} SAN=1
+      - name: Python tests
+        if: matrix.cc == 'gcc'
+        run: python3 -m unittest discover -s tests -v
+      - name: Settings page preview matches the app's gate
+        if: matrix.cc == 'gcc'
+        run: make -C tests clean preview
+
+  acap-build:
+    name: ACAP build (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [armv7hf, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the .eap with the ACAP Native SDK
+        run: |
+          version=$(jq -r '.acapPackageConf.setup.version' app/manifest.json)
+          docker build --platform linux/amd64 --build-arg ARCH=${{ matrix.arch }} -t lineinrtp:ci .
+          id=$(docker create lineinrtp:ci)
+          docker cp "$id":/opt/app/. out/
+          docker rm "$id"
+          ls -l out/*.eap
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lineinrtp-${{ env.VERSION }}-${{ matrix.arch }}-unsigned
+          path: out/*.eap
+          if-no-files-found: error
