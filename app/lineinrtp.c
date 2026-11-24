@@ -2,10 +2,17 @@
  * Copyright (c) 2026 mrdnlabs.pro
  * SPDX-License-Identifier: MIT
  *
- * Captures the C8110 line input and sends unicast G.711 A-law RTP while the
- * level stays above a threshold. Audio Manager Pro RTP sources listen; this
- * app is the sender. Packets stop when the input goes quiet so the server's
- * activity detector sees the source go idle.
+ * Captures the C8110 line input and runs a gate on it: open while the level
+ * stays above a threshold, shaped by delay, hold and maximum-on times.
+ *
+ * With AXIS Audio Manager Pro the app sends unicast RTP (G.711 A-law or L16)
+ * while the gate is open. Pro's RTP sources listen; packets stop when the
+ * input goes quiet so the server's activity detector sees the source go idle.
+ *
+ * With AXIS Audio Manager Edge nothing is sent. The app raises an event while
+ * the gate is open, and a rule on the device turns that into "Activate
+ * Line-in", so Edge pages from the line input itself. manager.c works out
+ * which of the two applies and keeps that rule in place.
  */
 
 #define _GNU_SOURCE
@@ -37,6 +44,8 @@
 #include <spa/param/audio/format-utils.h>
 #pragma GCC diagnostic pop
 
+#include "manager.h"
+#include "mgrcore.h"
 #include "rtpcore.h"
 
 #define APP_NAME "lineinrtp"
@@ -73,6 +82,7 @@ struct cfg {
     int codec;        /* enum rtp_codec */
     int sample_rate;  /* L16 only: 16000 or 48000 */
     int payload_type; /* L16 only: 96-127 */
+    int manager;      /* enum mgr_mode */
 };
 
 /* HTTP thread -> control thread. */
@@ -132,6 +142,10 @@ struct status_snap {
     uint64_t send_errors;
     uint64_t samples_dropped;
     unsigned buffered_samples;
+    int manager;             /* the setting, enum mgr_mode */
+    struct mgr_snapshot mgr; /* what manager.c found */
+    bool edge_paging;        /* the Edge paging event is raised */
+    int edge_confirmed;      /* 1: Edge reports the page active; 0: it doesn't; -1: not checked yet */
 };
 
 struct node_ref {
@@ -215,6 +229,15 @@ static double g_tone_phase;
 static int64_t g_tone_start_ms;
 static uint64_t g_tone_produced;
 static bool g_tone_running; /* the tone clock is running for this stretch of test mode */
+/* Audio manager, main loop only: the latest snapshot from manager.c. */
+static struct mgr_snapshot g_mgr;
+static bool g_edge; /* Edge mode: the gate raises the paging event and no RTP is sent */
+static int64_t g_page_since;
+static int64_t g_source_asked_ms;
+static int64_t g_look_asked_ms;
+/* The Edge paging event. The main loop sets what it wants; the event thread sends it. */
+static volatile sig_atomic_t g_page_want;
+static gint g_page_declared;
 static volatile sig_atomic_t g_port_active[3] = {-1, -1, -1};
 static volatile sig_atomic_t g_port_numbering;
 static GMainLoop* g_event_loop;
@@ -372,6 +395,13 @@ static void read_cfg(AXParameter* params, struct cfg* out, char* err, size_t err
         param_str(params, "Codec", codec, sizeof codec, "pcma");
         next.codec = strcmp(codec, "l16") == 0 ? CODEC_L16 : CODEC_PCMA;
     }
+    {
+        char manager[16];
+        enum mgr_mode mode = MGR_AUTO;
+        param_str(params, "Manager", manager, sizeof manager, "auto");
+        mgr_mode_parse(manager, &mode); /* anything else stays Auto */
+        next.manager = mode;
+    }
     next.sample_rate  = param_int(params, "SampleRate", 48000, 8000, 48000);
     next.payload_type = param_int(params, "PayloadType", 96, 96, 127);
     if (next.sample_rate != 16000 && next.sample_rate != 48000) {
@@ -445,6 +475,9 @@ static bool write_cfg(AXParameter* p, const struct cfg* want, const struct cfg* 
     ok = put_int(p, "MaxOnS", want->max_on_s, have->max_on_s, err, err_len) && ok;
     if (want->codec != have->codec) {
         ok = set_param(p, "Codec", want->codec == CODEC_L16 ? "l16" : "pcma", err, err_len) && ok;
+    }
+    if (want->manager != have->manager) {
+        ok = set_param(p, "Manager", mgr_mode_name((enum mgr_mode)want->manager), err, err_len) && ok;
     }
     ok = put_int(p, "SampleRate", want->sample_rate, have->sample_rate, err, err_len) && ok;
     ok = put_int(p, "PayloadType", want->payload_type, have->payload_type, err, err_len) && ok;
@@ -542,9 +575,77 @@ static guint subscribe_ports(AXEventHandler* handler, const char* topic2, const 
     return subscription;
 }
 
+static void page_declared(guint declaration, gpointer user_data) {
+    (void)declaration;
+    (void)user_data;
+    g_atomic_int_set(&g_page_declared, 1);
+}
+
+/* A property-state event, false at start: "Line Input RTP: Edge paging".
+ * The rule manager.c adds uses it as its condition. */
+static guint declare_page_event(AXEventHandler* handler) {
+    AXEventKeyValueSet* set = ax_event_key_value_set_new();
+    guint declaration       = 0;
+    gboolean off            = FALSE;
+    GError* error           = NULL;
+
+    ax_event_key_value_set_add_key_value(set, "topic0", "tnsaxis", "CameraApplicationPlatform", AX_VALUE_TYPE_STRING,
+                                         NULL);
+    ax_event_key_value_set_add_key_value(set, "topic1", "tnsaxis", EDGE_EVENT_TOPIC1, AX_VALUE_TYPE_STRING, NULL);
+    ax_event_key_value_set_add_key_value(set, "topic2", "tnsaxis", EDGE_EVENT_TOPIC2, AX_VALUE_TYPE_STRING, NULL);
+    ax_event_key_value_set_add_nice_names(set, "topic1", "tnsaxis", NULL, "Line Input RTP", NULL);
+    ax_event_key_value_set_add_nice_names(set, "topic2", "tnsaxis", NULL, "Line Input RTP: Edge paging", NULL);
+    ax_event_key_value_set_add_key_value(set, EDGE_EVENT_KEY, NULL, &off, AX_VALUE_TYPE_BOOL, NULL);
+    ax_event_key_value_set_mark_as_data(set, EDGE_EVENT_KEY, NULL, NULL);
+    ax_event_key_value_set_add_nice_names(set, EDGE_EVENT_KEY, NULL, "Paging", NULL, NULL);
+    if (!ax_event_handler_declare(handler, set, FALSE, &declaration, page_declared, NULL, &error)) {
+        syslog(LOG_ERR, "Could not declare the Edge paging event: %s", error != NULL ? error->message : "unknown");
+        g_clear_error(&error);
+        declaration = 0;
+    }
+    ax_event_key_value_set_free(set);
+    return declaration;
+}
+
+static bool send_page_event(AXEventHandler* handler, guint declaration, gboolean on) {
+    AXEventKeyValueSet* set = ax_event_key_value_set_new();
+    AXEvent* event;
+    GError* error = NULL;
+    bool ok;
+
+    ax_event_key_value_set_add_key_value(set, EDGE_EVENT_KEY, NULL, &on, AX_VALUE_TYPE_BOOL, NULL);
+    event = ax_event_new2(set, NULL);
+    ax_event_key_value_set_free(set);
+    ok = ax_event_handler_send_event(handler, declaration, event, &error);
+    if (!ok) {
+        static unsigned failures;
+        if (failures++ % 100 == 0) {
+            syslog(LOG_ERR, "Could not send the Edge paging event: %s", error != NULL ? error->message : "unknown");
+        }
+        g_clear_error(&error);
+    }
+    ax_event_free(event);
+    return ok;
+}
+
+/* Main loop: asks the event thread to raise or drop the paging event. */
+static void want_page(bool on) {
+    int want = on ? 1 : 0;
+
+    if (g_page_want == want) {
+        return;
+    }
+    g_page_want = want;
+    if (g_atomic_int_get(&g_event_ready) == 1 && g_event_loop != NULL) {
+        g_main_context_wakeup(g_main_loop_get_context(g_event_loop));
+    }
+}
+
 static void* event_thread(void* unused) {
     AXEventHandler* handler = NULL;
     guint subscription      = 0;
+    guint page_decl         = 0;
+    int page_sent           = 0; /* the event is declared false */
     GMainLoop* loop;
 
     (void)unused;
@@ -557,10 +658,32 @@ static void* event_thread(void* unused) {
     handler      = ax_event_handler_new();
     if (handler != NULL) {
         subscription = subscribe_ports(handler, "Port", "tnsaxis");
+        page_decl    = declare_page_event(handler);
     }
     g_atomic_int_set(&g_event_ready, 1);
     while (g_atomic_int_get(&g_event_stop) == 0) {
+        int want = g_page_want;
+
+        if (page_decl != 0 && want != page_sent && g_atomic_int_get(&g_page_declared) == 1) {
+            if (send_page_event(handler, page_decl, want != 0)) {
+                page_sent = want;
+            } else {
+                /* A page must never be left on: keep trying, ten times a second. */
+                g_main_context_iteration(g_main_loop_get_context(loop), FALSE);
+                g_usleep(100000);
+            }
+            continue; /* look again before sleeping: it may have changed meanwhile */
+        }
         g_main_context_iteration(g_main_loop_get_context(loop), TRUE);
+    }
+    /* Don't leave a page running when the app stops. The declaration itself
+     * goes away with the process (and the event with it, should the app ever
+     * die without getting here); undeclaring by hand only adds a 2 s wait. */
+    if (page_decl != 0 && page_sent != 0) {
+        int i;
+        send_page_event(handler, page_decl, FALSE);
+        for (i = 0; i < 20 && g_main_context_iteration(g_main_loop_get_context(loop), FALSE); i++) {
+        }
     }
     if (handler != NULL && subscription != 0) {
         ax_event_handler_unsubscribe(handler, subscription, NULL);
@@ -573,8 +696,21 @@ static void* event_thread(void* unused) {
     return NULL;
 }
 
+/* The test tone is an RTP feature. In Edge mode the page is the line input
+ * itself, so a saved Test tone setting behaves as Auto. */
+static bool tone_mode(void) {
+    return g_cfg.test_mode && !g_edge;
+}
+
 /* Side effects of the gate closing. The gate state itself lives in rtpcore.c. */
 static void streaming_stopped(const char* reason) {
+    if (g_edge) {
+        syslog(LOG_INFO, "Edge paging stopped (%s), level %.1f dBFS", reason, g_level_db);
+        want_page(false);
+        mgr_check_source(600);
+        clear_ring();
+        return;
+    }
     syslog(LOG_INFO, "RTP stopped (%s), level %.1f dBFS, packets %llu", reason, g_level_db,
            (unsigned long long)g_packets_sent);
     rtp_tx_stop(&g_rtp, now_ms());
@@ -587,13 +723,24 @@ static void streaming_started(const char* reason) {
     int64_t now   = now_ms();
     unsigned keep = (unsigned)((uint64_t)g_cfg.activation_delay_ms * g_fmt.rate / 1000U);
 
+    if (g_edge) {
+        /* Edge reads the line input itself from the moment the rule fires,
+         * so there is no pre-roll to keep. */
+        clear_ring();
+        g_page_since      = now;
+        g_source_asked_ms = now;
+        want_page(true);
+        mgr_check_source(400);
+        syslog(LOG_INFO, "Edge paging started (%s), level %.1f dBFS", reason, g_level_db);
+        return;
+    }
     if (keep < g_fmt.packet_samples) {
         keep = g_fmt.packet_samples;
     }
     if (keep > g_ring_cap) {
         keep = g_ring_cap;
     }
-    if (g_cfg.test_mode) {
+    if (tone_mode()) {
         keep = 0; /* the tone starts clean; on_timeout() starts its clock */
     }
     trim_ring(keep);
@@ -658,9 +805,10 @@ static void update_gate(void) {
     struct gate_result r;
 
     memset(&in, 0, sizeof in);
-    in.enabled              = g_cfg.enabled;
-    in.have_destination     = g_cfg.destination_ip[0] != '\0';
-    in.test_mode            = g_cfg.test_mode;
+    /* Auto holds the gate closed until manager.c has looked at the device. */
+    in.enabled              = g_cfg.enabled && g_mgr.active != ACTIVE_UNKNOWN;
+    in.have_destination     = g_edge || g_cfg.destination_ip[0] != '\0';
+    in.test_mode            = tone_mode();
     in.force_on             = g_cfg.force_on;
     in.format_ready         = g_impl.format_ready;
     in.trigger_port         = g_cfg.trigger_port;
@@ -822,6 +970,10 @@ static void run_test_tone(int64_t now) {
 static void drain_audio(void) {
     unsigned sent = 0;
 
+    if (g_edge) {
+        clear_ring(); /* nothing is sent: Edge pages from the input itself */
+        return;
+    }
     if (!g_gate.streaming) {
         if (g_gate.hot_since == 0) {
             clear_ring();
@@ -832,6 +984,15 @@ static void drain_audio(void) {
         send_packet();
         sent++;
     }
+}
+
+/* Whether Edge itself reports the page this gate asked for: 1 yes, 0 no,
+ * -1 not checked since the gate opened (or the gate is closed). */
+static int edge_confirmed(void) {
+    if (!g_edge || !g_gate.streaming || g_mgr.source_checked_ms < g_page_since + 300) {
+        return -1;
+    }
+    return g_mgr.source_active;
 }
 
 static void publish_status(const char* gate) {
@@ -864,6 +1025,10 @@ static void publish_status(const char* gate) {
     snap.send_errors          = g_send_errors;
     snap.samples_dropped      = g_samples_dropped;
     snap.buffered_samples     = g_ring_count;
+    snap.manager              = g_cfg.manager;
+    snap.mgr                  = g_mgr;
+    snap.edge_paging          = g_edge && g_gate.streaming;
+    snap.edge_confirmed       = edge_confirmed();
     snprintf(snap.gate, sizeof snap.gate, "%s", gate);
     snprintf(snap.destination_ip, sizeof snap.destination_ip, "%s", g_cfg.destination_ip);
     if (g_cfg.destination_ip[0] != '\0') {
@@ -957,6 +1122,7 @@ static void take_control_updates(void) {
         /* The revision and the values it confirms reach /api/status together. */
         g_cfg             = u.cfg;
         g_cfg_rev_applied = u.rev;
+        mgr_set_mode((enum mgr_mode)g_cfg.manager);
         snprintf(g_cfg_save_error, sizeof g_cfg_save_error, "%s", u.save_error);
         if (u.cfg_error[0] != '\0') {
             set_error(ERR_CONFIG, u.cfg_error);
@@ -965,6 +1131,34 @@ static void take_control_updates(void) {
         }
         /* After the config error slot is settled, so a codec error it sets stays. */
         configure_audio();
+    }
+}
+
+/* Picks up what manager.c found. A change of mode ends whatever the gate was
+ * doing in the old one: RTP stops, or the Edge page is dropped. */
+static void take_manager_updates(int64_t now) {
+    struct mgr_snapshot m;
+    bool edge;
+
+    mgr_get(&m);
+    edge = m.active == ACTIVE_EDGE;
+    if (edge != g_edge) {
+        stop_streaming("audio manager changed");
+        want_page(false);
+        clear_error(ERR_NETWORK);
+        g_edge = edge;
+    }
+    g_mgr = m;
+    /* While a page is open and Edge hasn't confirmed it, ask again now and then. */
+    if (g_edge && g_gate.streaming && edge_confirmed() != 1 && now - g_source_asked_ms >= 2000) {
+        g_source_asked_ms = now;
+        mgr_check_source(0);
+    }
+    /* Edge says it isn't paging: have the rule and the recipient looked at
+     * now, so the page can say why, rather than at the next pass. */
+    if (edge_confirmed() == 0 && now - g_look_asked_ms >= 5000) {
+        g_look_asked_ms = now;
+        mgr_look_now();
     }
 }
 
@@ -1001,10 +1195,11 @@ static void on_timeout(void* data, uint64_t expirations) {
     (void)expirations;
     now = now_ms();
     take_control_updates();
+    take_manager_updates(now);
     check_capture(impl, now);
     ensure_stream(impl, now);
     update_gate();
-    if (g_cfg.test_mode && g_gate.streaming) {
+    if (tone_mode() && g_gate.streaming) {
         if (!g_tone_running) {
             start_test_tone(now);
         }
@@ -1013,11 +1208,11 @@ static void on_timeout(void* data, uint64_t expirations) {
         g_tone_running = false;
     }
     drain_audio();
-    gate = gate_state(&g_gate, g_cfg.test_mode);
+    gate = gate_state(&g_gate, tone_mode());
     record_history(now, gate);
     publish_status(gate);
 
-    if (g_gate.streaming && now - g_last_report_ms >= 10000) {
+    if (g_gate.streaming && !g_edge && now - g_last_report_ms >= 10000) {
         g_last_report_ms = now;
         syslog(LOG_INFO, "Streaming level %.1f dBFS packets %llu errors %llu", g_level_db,
                (unsigned long long)g_packets_sent, (unsigned long long)g_send_errors);
@@ -1139,7 +1334,7 @@ static void on_process(void* data) {
         return;
     }
     g_last_process_ms = now_ms();
-    if (g_cfg.test_mode) {
+    if (tone_mode()) {
         pw_stream_queue_buffer(impl->stream, buffer);
         return;
     }
@@ -1469,6 +1664,34 @@ static char* status_json(long long since) {
     }
     json_object_set_new(root, "errors", errors);
     json_object_set_new(root, "lastRtpHeader", json_string(snap.last_rtp_header));
+    /* Which audio manager: the setting, what the device looks like, and what
+     * the app is doing as a result. */
+    json_object_set_new(root, "manager", json_string(mgr_mode_name((enum mgr_mode)snap.manager)));
+    json_object_set_new(root, "activeMode", json_string(mgr_active_name(snap.mgr.active)));
+    {
+        json_t* detect = json_object();
+        json_t* edge   = json_object();
+
+        json_object_set_new(detect, "known", json_boolean(snap.mgr.detect.known));
+        json_object_set_new(detect, "edgeSite", json_boolean(snap.mgr.detect.edge_site));
+        json_object_set_new(detect, "siteName", json_string(snap.mgr.site_name));
+        json_object_set_new(detect, "proApp", json_boolean(snap.mgr.detect.pro_app));
+        json_object_set_new(detect, "proInstalled", json_boolean(snap.mgr.pro_installed));
+        json_object_set_new(detect, "proAppName", json_string(snap.mgr.pro_app));
+        json_object_set_new(detect, "proServer", json_string(snap.mgr.pro_server));
+        json_object_set_new(detect, "error", json_string(snap.mgr.error));
+        json_object_set_new(root, "detect", detect);
+        json_object_set_new(edge, "paging", json_boolean(snap.edge_paging));
+        json_object_set_new(edge, "confirmed", json_integer(snap.edge_confirmed));
+        json_object_set_new(edge, "lineIn", json_integer(snap.mgr.line_in));
+        json_object_set_new(edge, "sourceActive", json_integer(snap.mgr.source_active));
+        json_object_set_new(edge, "rule", json_string(edge_rule_state_name(snap.mgr.rule)));
+        json_object_set_new(edge, "ruleCreated", json_boolean(snap.mgr.rule_created));
+        json_object_set_new(edge, "ruleName", json_string(EDGE_RULE_NAME));
+        json_object_set_new(edge, "otherRules", json_integer(snap.mgr.other_rules));
+        json_object_set_new(edge, "otherRuleNames", json_string(snap.mgr.other_rule_names));
+        json_object_set_new(root, "edge", edge);
+    }
     /* Four significant digits keep quiet levels exact enough on a dB scale
      * (0.003162 is -90.0 dBFS) without jansson's default 17. */
     text = json_dumps(root, JSON_COMPACT | JSON_REAL_PRECISION(4));
@@ -1516,7 +1739,7 @@ static bool json_has_config(json_t* root) {
     static const char* keys[] = {
         "enabled", "forceOn", "testMode", "trigger", "destinationIp", "destinationPort", "thresholdDb",
         "marginDb", "activationDelayMs", "deactivationDelayS", "maxOnS", "inputNode", "codec", "sampleRate",
-        "payloadType", NULL,
+        "payloadType", "manager", NULL,
     };
     const char** key;
 
@@ -1584,6 +1807,7 @@ static char* config_from_body(const char* body, size_t length, int* http_code) {
     cfg.codec                 = snap.codec;
     cfg.sample_rate           = snap.sample_rate > 0 ? snap.sample_rate : 48000;
     cfg.payload_type          = snap.payload_type > 0 ? snap.payload_type : 96;
+    cfg.manager               = snap.manager;
     snprintf(cfg.destination_ip, sizeof cfg.destination_ip, "%s", snap.destination_ip);
     snprintf(cfg.input_node, sizeof cfg.input_node, "%s", snap.input_node[0] != '\0' ? snap.input_node : DEFAULT_NODE);
 
@@ -1632,6 +1856,19 @@ static char* config_from_body(const char* body, size_t length, int* http_code) {
             } else {
                 ok = false;
                 snprintf(err, sizeof err, "codec must be pcma or l16");
+            }
+        }
+    }
+
+    {
+        json_t* manager = json_object_get(root, "manager");
+        if (manager != NULL) {
+            enum mgr_mode mode;
+            if (mgr_mode_parse(json_string_value(manager), &mode)) {
+                cfg.manager = mode;
+            } else {
+                ok = false;
+                snprintf(err, sizeof err, "manager must be auto, pro or edge");
             }
         }
     }
@@ -1965,6 +2202,7 @@ static void shutdown_app(struct impl* impl) {
         pthread_join(impl->http_thread, NULL);
     }
     stop_control(impl);
+    mgr_stop();
     if (g_rtp_fd >= 0) {
         close(g_rtp_fd);
         g_rtp_fd = -1;
@@ -2016,6 +2254,17 @@ int main(int argc, char* argv[]) {
     openlog(APP_NAME, LOG_PID, LOG_USER);
     memset(impl, 0, sizeof *impl);
     impl->http_listen_fd = -1;
+    /* Block the signals the loop handles before any thread exists. Library
+     * threads (GDBus starts one inside ax_parameter_new) then inherit the
+     * mask, so SIGTERM always reaches on_signal() and the app shuts down in
+     * order, instead of dying on whichever thread the signal landed on. */
+    {
+        sigset_t set;
+        sigemptyset(&set);
+        sigaddset(&set, SIGINT);
+        sigaddset(&set, SIGTERM);
+        pthread_sigmask(SIG_BLOCK, &set, NULL);
+    }
     {
         uint8_t rnd[10];
         random_bytes(rnd, sizeof rnd);
@@ -2089,10 +2338,15 @@ int main(int argc, char* argv[]) {
     } else {
         syslog(LOG_ERR, "Input events unavailable");
     }
+    if (!mgr_start((enum mgr_mode)g_cfg.manager)) {
+        syslog(LOG_ERR, "Could not start the audio manager check; Auto behaves as Audio Manager Pro");
+    }
+    mgr_get(&g_mgr);
+    g_edge = g_mgr.active == ACTIVE_EDGE;
 
     configure_audio();
-    syslog(LOG_INFO, "Line Input RTP started. Node %s, threshold %d dBFS, release %d dB", g_cfg.input_node,
-           g_cfg.threshold_db, g_cfg.margin_db);
+    syslog(LOG_INFO, "Line Input RTP started. Node %s, threshold %d dBFS, release %d dB, audio manager %s",
+           g_cfg.input_node, g_cfg.threshold_db, g_cfg.margin_db, mgr_mode_name((enum mgr_mode)g_cfg.manager));
     pw_main_loop_run(impl->loop);
 
     syslog(LOG_INFO, "Line Input RTP stopped");

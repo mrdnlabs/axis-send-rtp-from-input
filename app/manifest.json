@@ -7,6 +7,11 @@
                     "pipewire"
                 ]
             }
+        },
+        "dbus": {
+            "requiredMethods": [
+                "com.axis.HTTPConf1.VAPIXServiceAccounts1.GetCredentials"
+            ]
         }
     },
     "acapPackageConf": {
@@ -16,7 +21,7 @@
             "vendor": "dnicholl.axis@gmail.com",
             "vendorId": "6ee443117c",
             "runMode": "respawn",
-            "version": "1.7.0",
+            "version": "1.8.0",
             "compatibleOsVersions": [
                 {
                     "min": "12.11.72",
@@ -53,6 +58,11 @@
                     "name": "TestMode",
                     "default": "no",
                     "type": "bool:no,yes"
+                },
+                {
+                    "name": "Manager",
+                    "default": "auto",
+                    "type": "string"
                 },
                 {
                     "name": "Trigger",

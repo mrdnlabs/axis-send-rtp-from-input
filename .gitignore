@@ -12,6 +12,7 @@ tools/force-on.json
 
 # Host test binaries
 tests/test_rtpcore
+tests/test_mgrcore
 tests/__pycache__/
 tests/gate_dump
 tests/gate_vectors.json
