@@ -19,7 +19,12 @@
  *   --hang     fraction 0-1 of status requests that never get a reply
  *
  * While it runs, POST /mock/control with JSON such as {"latency":2000} or
- * {"down":true} changes the behaviour without a restart.
+ * {"down":true} changes the behaviour without a restart. The audio manager
+ * side is set the same way: {"edgeSite":true,"siteName":"Lobby"} puts the
+ * mock in an Audio Manager Edge site, {"proApp":true} runs the Pro app, and
+ * edgeLineIn (1, 0, -1), edgeRule ("ok", "changed", "missing"),
+ * edgeOtherRules (names, comma-separated) and edgeConfirms (false: Edge
+ * never starts the page) shape what the Edge card shows.
  */
 "use strict";
 
@@ -39,6 +44,8 @@ const knobs = {
   fail: opt("fail", 0),
   hang: opt("hang", 0),
   down: false,
+  edgeSite: false, siteName: "Lobby", proApp: false, proServer: "192.168.1.20",
+  edgeLineIn: 1, edgeRule: "ok", edgeOtherRules: "", edgeConfirms: true, detectError: "",
   errors: []   /* e.g. [{"area":"capture","message":"No audio from the input, reconnecting"}] */
 };
 const PAGE = path.join(__dirname, "..", "app", "html", "index.html");
@@ -51,8 +58,11 @@ const cfg = {
   destinationIp: "192.168.1.50", destinationPort: 49000,
   thresholdDb: -45, marginDb: 6, activationDelayMs: 200, deactivationDelayS: 2, maxOnS: 0,
   inputNode: "AudioDevice0Input0.Unprocessed",
-  codec: "pcma", sampleRate: 48000, payloadType: 96
+  codec: "pcma", sampleRate: 48000, payloadType: 96, manager: "auto"
 };
+/* The same rule as mgr_resolve() in app/mgrcore.c. */
+const activeMode = () => cfg.manager !== "auto" ? cfg.manager : knobs.proApp ? "pro" : knobs.edgeSite ? "edge" : "pro";
+const toneMode = () => cfg.testMode && activeMode() !== "edge";
 let configRev = 0;
 let requestedRev = 0;
 let configError = "";
@@ -71,7 +81,7 @@ function inputPercent(t) {
     burstUntil = t + 2000 + Math.random() * 3000;
     silentUntil = burstUntil + 3000 + Math.random() * 5000;
   }
-  if (cfg.testMode) return 25;
+  if (toneMode()) return 25;
   const db = t < burstUntil
     ? -28 + 10 * Math.sin(t / 90) - (Math.random() < 0.12 ? 25 : 0) + Math.random() * 4
     : FLOOR_DB + Math.random() * 2;
@@ -82,8 +92,8 @@ function step(t) {
   levelPercent = inputPercent(t);
   port1 = Math.floor(t / 7000) % 2;
   const off = (g, reason) => { if (g.streaming) { g.streaming = false; g.quietSince = 0; } g.hotSince = 0; return reason; };
-  if (!cfg.enabled || !cfg.destinationIp) { gate.waiting = false; off(gate); return; }
-  if (cfg.testMode || cfg.forceOn) { gate.waiting = false; if (!gate.streaming) { gate.streaming = true; gate.activeSince = t; } return; }
+  if (!cfg.enabled || (activeMode() !== "edge" && !cfg.destinationIp)) { gate.waiting = false; off(gate); return; }
+  if (toneMode() || cfg.forceOn) { gate.waiting = false; if (!gate.streaming) { gate.streaming = true; gate.activeSince = t; } return; }
   let hot, idle;
   if (cfg.trigger === "level") {
     const db = levelPercent > 0 ? 20 * Math.log10(levelPercent / 100) : -120;
@@ -111,7 +121,7 @@ function step(t) {
 function gateName() {
   if (gate.waiting) return "waiting";
   if (gate.streaming && gate.quietSince) return "holding";
-  if (gate.streaming && cfg.testMode) return "test";
+  if (gate.streaming && toneMode()) return "test";
   if (gate.streaming) return "active";
   if (gate.hotSince) return "pending";
   return "inactive";
@@ -128,7 +138,7 @@ setInterval(() => {
   for (let i = 0; i < 10; i++) {
     step(t + i * 10);
     peak = Math.max(peak, levelPercent);
-    if (gate.streaming && i % 2 === 0) packetsSent++;
+    if (gate.streaming && activeMode() !== "edge" && i % 2 === 0) packetsSent++;
     if (++tick % (IV / 10) === 0) {
       push(hist.level, Number(peak.toPrecision(4)));
       push(hist.gate, GATE_CODE[gateName()]);
@@ -161,7 +171,23 @@ function status(since) {
     rtpCodec: cfg.codec === "l16" ? "L16" : "PCMA", rtpPayloadType: cfg.codec === "l16" ? cfg.payloadType : 8,
     rtpRate: cfg.codec === "l16" ? cfg.sampleRate : 8000, packetMs: cfg.codec === "l16" && cfg.sampleRate === 48000 ? 10 : 20,
     packetsSent, sendErrors: 0, samplesDropped: 0, bufferedSamples: gate.streaming ? 80 : 0,
-    lastError: knobs.errors.length ? knobs.errors[0].message : "", errors: knobs.errors, lastRtpHeader: gate.streaming ? "8008a1b2c3d4e5f6deadbeef" : ""
+    lastError: knobs.errors.length ? knobs.errors[0].message : "", errors: knobs.errors, lastRtpHeader: gate.streaming ? "8008a1b2c3d4e5f6deadbeef" : "",
+    manager: cfg.manager, activeMode: activeMode(),
+    detect: { known: true, edgeSite: knobs.edgeSite, siteName: knobs.edgeSite ? knobs.siteName : "", proApp: knobs.proApp,
+      proInstalled: knobs.proApp, proAppName: knobs.proApp ? "AudioManagerPro" : "", proServer: knobs.proApp ? knobs.proServer : "", error: knobs.detectError },
+    edge: edgeStatus()
+  };
+}
+
+function edgeStatus() {
+  const live = activeMode() === "edge" && knobs.edgeSite;
+  const paging = activeMode() === "edge" && gate.streaming;
+  const others = knobs.edgeOtherRules ? knobs.edgeOtherRules.split(",").map((x) => x.trim()).filter(Boolean) : [];
+  return {
+    paging, confirmed: paging ? (knobs.edgeConfirms ? 1 : 0) : -1,
+    lineIn: live ? knobs.edgeLineIn : -1, sourceActive: live ? (paging && knobs.edgeConfirms ? 1 : 0) : -1,
+    rule: live ? knobs.edgeRule : "unknown", ruleCreated: false, ruleName: "Line Input RTP: Edge paging",
+    otherRules: live ? others.length : 0, otherRuleNames: live ? others.join(", ") : ""
   };
 }
 
@@ -174,7 +200,7 @@ function validIp(ip) {
 
 function applyConfig(body) {
   const next = Object.assign({}, cfg);
-  const ints = { destinationPort: [1, 65535], thresholdDb: [-90, 0], marginDb: [0, 40],
+  const ints = { destinationPort: [1, 65535], thresholdDb: [-90, 0], marginDb: [0, 90],
     activationDelayMs: [0, 10000], deactivationDelayS: [0, 60], maxOnS: [0, 3600], payloadType: [96, 127],
     sampleRate: [16000, 48000] };
   for (const k of ["enabled", "forceOn", "testMode"]) {
@@ -190,6 +216,10 @@ function applyConfig(body) {
   if ("codec" in body) {
     if (!["pcma", "l16"].includes(body.codec)) return "codec must be pcma or l16";
     next.codec = body.codec;
+  }
+  if ("manager" in body) {
+    if (!["auto", "pro", "edge"].includes(body.manager)) return "manager must be auto, pro or edge";
+    next.manager = body.manager;
   }
   if (next.sampleRate !== 16000 && next.sampleRate !== 48000) return "sampleRate must be 16000 or 48000";
   if ("trigger" in body) {

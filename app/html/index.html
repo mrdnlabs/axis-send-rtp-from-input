@@ -218,6 +218,7 @@
     .seg.n4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
     .seg.n3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .seg button { height: 36px; border: 0; border-radius: 7px; font-size: 13.5px; font-weight: 500; background: transparent; color: var(--ink-2); padding: 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .seg button:disabled { opacity: .45; cursor: default; }
     .seg button[aria-pressed="true"] { background: var(--seg-on); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px var(--shadow), 0 0 0 1px var(--line); }
     .slider { display: flex; flex-direction: column; gap: 4px; padding: 12px 0; border-top: 1px solid var(--line-soft); }
     .slider .top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -257,7 +258,7 @@
       </div>
       <div>
         <h1>Line Input RTP</h1>
-        <div class="sub">Line input to RTP for Audio Manager Pro</div>
+        <div class="sub" id="subTitle">Line input paging for Audio Manager Pro and Edge</div>
       </div>
     </div>
     <div class="chip" id="chip" role="status" aria-live="polite"><i></i><span id="chipText">Connecting…</span></div>
@@ -315,8 +316,8 @@
       <div class="crow xaxis" aria-hidden="true"><span></span><div class="ticks"><span>−24 s</span><span>−18 s</span><span>−12 s</span><span>−6 s</span><span>now</span></div></div>
       <div class="crow lanekey"><span></span><div class="legend">
         <span><i class="sw" style="background:var(--lane-open);box-shadow:inset 2px 0 0 var(--open-ink)"></i>Opening</span>
-        <span><i class="sw" style="background:var(--lane-send)"></i>Sending</span>
-        <span><i class="sw" style="background:var(--lane-hold)"></i>Holding, still sending</span>
+        <span><i class="sw" style="background:var(--lane-send)"></i><b id="keySend" style="font-weight:400">Sending</b></span>
+        <span><i class="sw" style="background:var(--lane-hold)"></i><b id="keyHold" style="font-weight:400">Holding, still sending</b></span>
         <span><i class="sw" style="background:var(--lane-wait)"></i>Max on, re-arming</span>
       </div></div>
     </div>
@@ -327,14 +328,26 @@
     </div>
     <div class="stats">
       <div class="stat"><span>Input peak</span><strong id="stLevel">—</strong><small id="stLevelDb"></small></div>
-      <div class="stat"><span>Packets sent</span><strong id="stPackets">0</strong><small id="stPacketsSub">50 per second while sending</small></div>
-      <div class="stat"><span>Send errors</span><strong id="stErrors">0</strong><small>Since start</small></div>
+      <div class="stat"><span id="stPacketsLabel">Packets sent</span><strong id="stPackets">0</strong><small id="stPacketsSub">50 per second while sending</small></div>
+      <div class="stat"><span id="stErrorsLabel">Send errors</span><strong id="stErrors">0</strong><small id="stErrorsSub">Since start</small></div>
       <div class="stat"><span>Samples dropped</span><strong id="stDropped">0</strong><small>Buffer overruns</small></div>
       <div class="stat"><span>Capture</span><strong id="stCapture">—</strong><small id="stCaptureSub"></small></div>
     </div>
   </section>
 
   <div class="controls">
+    <section class="card" aria-labelledby="mgrTitle">
+      <h2 id="mgrTitle">Audio manager</h2>
+      <div class="field">
+        <div class="seg n3" role="group" aria-labelledby="mgrTitle" id="managers">
+          <button type="button" data-v="auto">Auto-detect</button>
+          <button type="button" data-v="pro">Pro (RTP)</button>
+          <button type="button" data-v="edge">Edge (Line-in)</button>
+        </div>
+        <p class="help" id="mgrHelp"></p>
+      </div>
+    </section>
+
     <section class="card" aria-labelledby="sendTitle">
       <h2 id="sendTitle">When to send</h2>
       <div class="field">
@@ -370,7 +383,7 @@
         <div class="slider" data-key="delay" data-min="0" data-max="10000">
           <div class="top"><label for="sDelay">Activation delay</label><span class="num"><input type="number" min="0" max="10000" step="50" aria-label="Activation delay, exact value"><span>ms</span></span></div>
           <input id="sDelay" type="range" min="0" max="2000" step="50">
-          <p class="help">How long the trigger must stay active before sending starts. Audio from this window is sent too.</p>
+          <p class="help" data-help="delay"></p>
         </div>
         <div class="slider" data-key="hold" data-min="0" data-max="60">
           <div class="top"><label for="sHold">Release hold</label><span class="num"><input type="number" min="0" max="60" step="1" aria-label="Release hold, exact value"><span>s</span></span></div>
@@ -386,7 +399,18 @@
       </div>
     </section>
 
-      <section class="card" aria-labelledby="destTitle">
+      <section class="card" aria-labelledby="edgeTitle" id="edgeCard" hidden>
+        <h2 id="edgeTitle">Audio Manager Edge</h2>
+        <p class="help" style="color:var(--ink-2)">While the gate is open, Edge pages from this device's line input. Nothing is sent as RTP. Choose the zones, priority and volume on the Line-in paging recipient in Audio Manager Edge.</p>
+        <dl>
+          <dt>Site</dt><dd id="eSite">—</dd>
+          <dt>Line-in recipient</dt><dd id="eLineIn">—</dd>
+          <dt>Rule on this device</dt><dd id="eRule">—</dd>
+          <dt>Page</dt><dd id="ePage">—</dd>
+        </dl>
+      </section>
+
+      <section class="card" aria-labelledby="destTitle" id="destCard">
         <h2 id="destTitle">Destination</h2>
         <div class="row">
           <label style="flex:3 1 150px">Receiver IP address
@@ -396,6 +420,8 @@
             <input type="number" id="port" min="1" max="65535">
           </label>
         </div>
+        <p class="help" id="proServerHint" hidden>This device's Audio Manager Pro server is <b id="proServerIp" style="font-family:var(--mono);color:var(--ink-2)"></b>.
+          <button type="button" class="btn small" id="useProServer" style="margin-left:6px">Use it</button></p>
         <p class="err" id="portErr" hidden>Use a UDP port from 1 to 65535.</p>
         <p class="err" id="ipErr" hidden>Use a unicast IPv4 address, such as 192.168.1.10. Multicast, broadcast and loopback are not sent.</p>
         <div class="field">
@@ -530,9 +556,23 @@ function cfgFromStatus(s) {
     margin: s.marginDb, delay: s.activationDelayMs, hold: s.deactivationDelayS, maxOn: s.maxOnS,
     ip: s.destinationIp || "", port: s.destinationPort, node: s.inputNode || "",
     codec: s.codec === "l16" ? "l16-" + (s.sampleRate === 16000 ? 16000 : 48000) : "pcma",
-    pt: typeof s.payloadType === "number" && s.payloadType >= 96 ? s.payloadType : 96
+    pt: typeof s.payloadType === "number" && s.payloadType >= 96 ? s.payloadType : 96,
+    manager: s.manager || "pro"   /* apps before 1.8.0 only did RTP */
   };
 }
+
+/* Which audio manager the settings in c would use: "pro" (RTP), "edge"
+   (Edge pages from the line input) or "unknown" while Auto is still looking
+   at the device. The same rule as mgr_resolve() in app/mgrcore.c. */
+function effMode(c) {
+  if (c.manager === "pro" || c.manager === "edge") return c.manager;
+  const d = status && status.detect;
+  if (!d) return "pro";
+  if (!d.known) return "unknown";
+  return d.proApp ? "pro" : d.edgeSite ? "edge" : "pro";
+}
+/* What the app is doing now, from saved settings. */
+function liveEdge() { return !!status && status.activeMode === "edge"; }
 /* No status for a while: two failures in a row, or one request that timed out. */
 function isLost() { return failures >= 2 || (failures >= 1 && timedOut); }
 
@@ -584,10 +624,11 @@ function validIp(ip) {
 /* Replays recorded history with settings c and returns the gate state at the
    end of each entry. A line-for-line port of gate_step(): each entry of ivMs
    is run as ivMs / 10 ticks at the entry's level, so an activation delay of
-   30 ms opens 30 ms in, as it does on the device. */
+   30 ms opens 30 ms in, as it does on the device. With c.edge (Audio Manager
+   Edge) no receiver address is needed and Test tone runs as Auto. */
 function simulate(h, c, ivMs) {
-  if (c.mode === "off" || !validIp(c.ip)) return h.map(() => "off");
-  if (c.mode === "test") return h.map(() => "test");
+  if (c.mode === "off" || (!c.edge && !validIp(c.ip))) return h.map(() => "off");
+  if (c.mode === "test" && !c.edge) return h.map(() => "test");
   if (c.mode === "always") return h.map(() => "always");
   const ticks = Math.max(1, Math.round((ivMs || 100) / TICK_MS));
   const rel = releaseDb(c);
@@ -775,10 +816,11 @@ function nudge(e) {
 }
 
 function renderChart(c, dirty) {
+  const viaEdge = effMode(c) === "edge";
   const H = paused && frozen ? frozen : hist;
   const view = H.slice(-N);
   const off = N - view.length;
-  const isAuto = c.mode === "auto";
+  const isAuto = c.mode === "auto" || (viaEdge && c.mode === "test");
   const isLevel = isAuto && c.trigger === "level";
   const isPort = isAuto && c.trigger !== "level";
   /* Entry i covers [i/N, (i+1)/N] of the width: the same scale as the bars. */
@@ -826,21 +868,25 @@ function renderChart(c, dirty) {
   });
   paintLane($("laneSent"), real, off);
   const dReal = describe(real);
-  $("laneSent").setAttribute("aria-label", "Sent: " + dReal.opens + " starts, " + dReal.secs.toFixed(1) + " s in the last 24 s");
-  $("laneSentLabel").textContent = dirty ? "Saved" : "Sent";
+  const wasEdge = liveEdge();
+  $("laneSent").setAttribute("aria-label", (wasEdge ? "Paged: " : "Sent: ") + dReal.opens + " starts, " + dReal.secs.toFixed(1) + " s in the last 24 s");
+  $("laneSentLabel").textContent = dirty ? "Saved" : wasEdge ? "Paged" : "Sent";
+  $("keySend").textContent = viaEdge ? "Paging" : "Sending";
+  $("keyHold").textContent = viaEdge ? "Holding, still paging" : "Holding, still sending";
 
   let caption;
   if (dirty) {
-    const sim = simulate(H, c, iv).slice(-N);
+    const sim = simulate(H, Object.assign({}, c, { edge: viaEdge }), iv).slice(-N);
     const dSim = describe(sim);
     paintLane($("lanePreview"), sim, off);
     paintSegments($("shade"), sim, LANE, off, "shade");
     $("lanePreview").setAttribute("aria-label", "Preview: " + dSim.opens + " starts, " + dSim.secs.toFixed(1) + " s");
     caption = "Preview: with your changes, the last " + Math.round(view.length * iv / 1000) + " s would have started " + times(dSim.opens) +
-      " and sent " + dSim.secs.toFixed(1) + " s of audio. What was actually sent: " + times(dReal.opens) + ", " + dReal.secs.toFixed(1) + " s.";
+      " and " + (viaEdge ? "paged " : "sent ") + dSim.secs.toFixed(1) + " s of audio. What was actually " + (wasEdge ? "paged: " : "sent: ") +
+      times(dReal.opens) + ", " + dReal.secs.toFixed(1) + " s.";
   } else {
     paintSegments($("shade"), real, LANE, off, "shade");
-    caption = !isAuto ? modeHelp(c.mode)
+    caption = !isAuto ? modeHelp(c.mode, viaEdge)
       : isLevel ? "Drag the Opens or Closes line, or move any setting below, to replay the recorded input with it before you save."
       : "Move any setting below to replay the recorded input with it before you save.";
   }
@@ -851,6 +897,39 @@ function renderChart(c, dirty) {
   renderHint(H, c);
 }
 
+/* What stands between the saved Edge setup and a working page. */
+function edgeNotices(c) {
+  const out = [];
+  const d = (status && status.detect) || {};
+  const e = (status && status.edge) || {};
+  if (d.error) out.push("Audio manager check: " + d.error + ".");
+  if (!liveEdge() || c.mode === "off") return out;
+  if (d.known && !d.edgeSite) {
+    out.push("This device isn't in an Audio Manager Edge site, so there is nothing to page through. Add it to a site, or set Audio manager to Pro.");
+    return out;
+  }
+  if (e.lineIn === 0) {
+    out.push("Audio Manager Edge has no Line-in paging recipient for this device. In Audio Manager Edge, go to Paging recipients, choose Create, " +
+      "pick One-way and Line-in, and select this device.");
+  }
+  if (e.rule === "changed") {
+    out.push("The rule “" + e.ruleName + "” was changed or turned off, so Edge won't page. Turn it back on under System > Events > Rules, " +
+      "or delete it there and the app adds it again within 15 seconds.");
+  }
+  if (e.otherRules > 0) {
+    out.push((e.otherRules === 1 ? "Another rule also switches" : "Other rules also switch") + " Edge's Line-in page: " + e.otherRuleNames +
+      ". " + (e.otherRules === 1 ? "It" : "They") + " can cut a page short or hold it open. Turn " + (e.otherRules === 1 ? "it" : "them") +
+      " off under System > Events > Rules.");
+  }
+  if (e.paging && e.confirmed === 0 && e.lineIn !== 0 && e.rule === "ok") {
+    out.push("The gate is open but Audio Manager Edge isn't paging. Check the Line-in paging recipient and its priority in Audio Manager Edge.");
+  }
+  if (c.mode === "test" && status.testMode) {
+    out.push("Test tone isn't available with Audio Manager Edge, which pages the line input itself. The app is running as Auto.");
+  }
+  return out;
+}
+
 /* Every error the app reports, labelled with where it comes from. Apps
    before 1.7.0 only send lastError. */
 function errorList() {
@@ -859,13 +938,61 @@ function errorList() {
   return status.lastError ? [status.lastError] : [];
 }
 
-function modeHelp(mode) {
+function modeHelp(mode, edge) {
+  if (edge) {
+    return {
+      off: "Nothing is paged.",
+      auto: "Pages while the trigger is active, shaped by the timing below.",
+      always: "Pages the line input all the time and ignores the trigger.",
+      test: "The test tone is sent as RTP, so it isn't available with Audio Manager Edge. The app runs as Auto instead."
+    }[mode];
+  }
   return {
     off: "Nothing is sent.",
     auto: "Sends while the trigger is active, shaped by the timing below.",
     always: "Sends the line input all the time and ignores the trigger.",
     test: "Sends a 1 kHz tone at −12 dBFS so you can check the receiver end to end."
   }[mode];
+}
+
+/* The line under the Audio manager choice: what Auto found, or what the
+   forced choice does. */
+function managerHelp(c) {
+  const d = (status && status.detect) || {};
+  const site = d.siteName ? "the Audio Manager Edge site “" + d.siteName + "”" : "an Audio Manager Edge site";
+  if (c.manager === "pro") {
+    return "Sends RTP to the receiver below while the gate is open." +
+      (d.known && d.edgeSite && !d.proApp ? " This device is in " + site + ", so Auto-detect would page through Edge." : "");
+  }
+  if (c.manager === "edge") {
+    return "Pages through Audio Manager Edge's Line-in while the gate is open. No RTP is sent." +
+      (d.known && d.proApp ? " The Audio Manager Pro app is running on this device, so Auto-detect would send RTP." : "");
+  }
+  if (!status || !status.detect) return "";
+  if (!d.known) return "Checking how this device is set up…";
+  if (d.proApp) return "Found the Audio Manager Pro app running on this device, so the app sends RTP.";
+  if (d.edgeSite) return "This device is in " + site + ", so the app pages through Edge's Line-in.";
+  return "Found no Audio Manager Edge site and no Audio Manager Pro app on this device, so the app sends RTP.";
+}
+
+/* The four lines of the Audio Manager Edge card, from what the app last saw. */
+function renderEdgeCard(c) {
+  const d = (status && status.detect) || {};
+  const e = (status && status.edge) || {};
+  const live = liveEdge();
+  $("eSite").textContent = !d.known ? "Checking…" : d.edgeSite ? (d.siteName || "Member of a site") : "This device isn't in a site";
+  if (!live) {
+    $("eLineIn").textContent = $("eRule").textContent = "—";
+    $("ePage").textContent = "Save to start paging through Edge";
+    return;
+  }
+  $("eLineIn").textContent = e.lineIn === 1 ? "Found for this device" : e.lineIn === 0 ? "None for this device yet" : "—";
+  $("eRule").textContent = e.rule === "ok" ? "“" + e.ruleName + "”" + (e.ruleCreated ? ", added by this app" : ", in place")
+    : e.rule === "changed" ? "“" + e.ruleName + "” was changed or turned off"
+    : e.rule === "missing" ? "Not added yet" : "—";
+  $("ePage").textContent = !e.paging ? (e.sourceActive === 1 ? "Edge is paging the line input, but not from this app" : "Idle")
+    : e.confirmed === 1 ? "Paging now, confirmed by Edge"
+    : e.confirmed === 0 ? "Asked for, but Edge isn't paging" : "Asked for, waiting for Edge";
 }
 
 function syncInput(el, value) {
@@ -888,11 +1015,14 @@ function renderChip() {
   if (isLost()) { cls = "lost"; text = "Connection lost"; }
   else if (status) {
     const g = status.gate;
+    const edge = liveEdge();
     if (!status.enabled) text = "Off";
-    else if (!status.destinationIp) text = "No destination";
+    else if (status.activeMode === "unknown") text = "Checking the device…";
+    else if (!edge && !status.destinationIp) text = "No destination";
     else if (g === "test") { cls = "send"; text = "Sending test tone"; }
+    else if (g === "active" && edge) { cls = "send"; text = status.forceOn ? "Paging via Edge, always on" : "Paging via Edge"; }
     else if (g === "active") { cls = "send"; text = status.forceOn ? "Streaming, always on" : "Streaming"; }
-    else if (g === "holding") { cls = "hold"; text = "Holding, still sending"; }
+    else if (g === "holding") { cls = "hold"; text = edge ? "Holding, still paging" : "Holding, still sending"; }
     else if (g === "pending") { cls = "open"; text = "Opening"; }
     else if (g === "waiting") { cls = "wait"; text = "Max on time, re-arming"; }
     else text = "Listening";
@@ -907,6 +1037,8 @@ function render() {
   const c = cur();
   const changed = changedKeys();
   const dirty = changed.length > 0;
+  const eff = effMode(c);
+  const edge = eff === "edge";
 
   $("save").hidden = $("discard").hidden = !dirty && !saving;
   $("save").disabled = saving || portBad || ptBlocks(c) || (c.ip !== "" && !validIp(c.ip));
@@ -916,10 +1048,20 @@ function render() {
   st.className = saveErr ? "saveerr" : "";
   st.textContent = saveErr || saveMsg || (dirty ? (changed.length === 1 ? "1 unsaved change" : changed.length + " unsaved changes") : "All changes saved");
 
-  document.querySelectorAll("#modes button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === c.mode)));
+  document.querySelectorAll("#managers button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === c.manager)));
+  $("mgrHelp").textContent = managerHelp(c);
+  $("sendTitle").textContent = edge ? "When to page" : "When to send";
+  $("edgeCard").hidden = !edge;
+  $("destCard").hidden = edge;
+  if (edge) renderEdgeCard(c);
+  document.querySelectorAll("#modes button").forEach((b) => {
+    b.setAttribute("aria-pressed", String(b.dataset.v === c.mode));
+    if (b.dataset.v === "test") b.disabled = edge && c.mode !== "test";
+  });
   document.querySelectorAll("#triggers button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === c.trigger)));
-  $("modeHelp").textContent = modeHelp(c.mode);
-  const isAuto = c.mode === "auto";
+  $("modeHelp").textContent = modeHelp(c.mode, edge);
+  /* With Edge, a saved Test tone setting runs as Auto, so show Auto's settings. */
+  const isAuto = c.mode === "auto" || (edge && c.mode === "test");
   const isLevel = isAuto && c.trigger === "level";
   $("triggerField").hidden = !isAuto;
   $("trigHelp").textContent = isLevel ? "Opens when the input peak reaches the activation level." : "Follows the digital input. The audio level is not used.";
@@ -945,10 +1087,13 @@ function render() {
   document.querySelector("[data-help=margin]").textContent =
     "Counts as quiet below " + fmtLvl(rel) + " dBFS, which is " + c.margin + " dB under the activation level. Up to " + cap +
     " dB here, down to the −90 dB floor. You can also drag the Closes line.";
+  document.querySelector("[data-help=delay]").textContent = edge
+    ? "How long the trigger must stay active before the page starts. Edge pages live, so sound from this window isn't heard: keep it short."
+    : "How long the trigger must stay active before sending starts. Audio from this window is sent too.";
   document.querySelector("[data-help=hold]").textContent = c.hold === 0
-    ? "Stops as soon as the trigger goes quiet." : "Keeps sending through gaps shorter than " + c.hold + " s.";
+    ? "Stops as soon as the trigger goes quiet." : "Keeps " + (edge ? "paging" : "sending") + " through gaps shorter than " + c.hold + " s.";
   document.querySelector("[data-help=maxOn]").textContent = c.maxOn === 0
-    ? "No limit. Set a limit to stop a stuck input from streaming forever."
+    ? "No limit. Set a limit to stop a stuck input from " + (edge ? "paging" : "streaming") + " forever."
     : "Stops after " + c.maxOn + " s, then waits for the trigger to go quiet before it can start again.";
 
   syncInput($("ip"), c.ip);
@@ -971,13 +1116,18 @@ function render() {
   const ipBad = c.ip !== "" && !validIp(c.ip);
   $("ip").setAttribute("aria-invalid", String(ipBad));
   $("ipErr").hidden = !ipBad;
+  /* The Pro app on this device knows its server: offer that address. */
+  const proServer = (status && status.detect && status.detect.proServer) || "";
+  $("proServerHint").hidden = !(validIp(proServer) && c.ip !== proServer);
+  $("proServerIp").textContent = proServer;
   $("url").textContent = c.ip ? "rtp://" + c.ip + ":" + c.port : "Set a receiver address";
   $("copy").disabled = !c.ip || ipBad;
 
   const notices = [];
   if (isLost()) notices.push("Lost contact with the app. The values shown may be out of date. Retrying…");
   errorList().forEach((e) => notices.push(e));
-  if (c.mode !== "off" && !c.ip) notices.push("Set a receiver IP address to start sending.");
+  if (c.mode !== "off" && !c.ip && eff === "pro") notices.push("Set a receiver IP address to start sending.");
+  edgeNotices(c).forEach((e) => notices.push(e));
   /* Rebuild only on a change: a new role=alert element is announced again, and
      replacing it every poll made its text impossible to select. */
   const key = notices.join("\n");
@@ -990,10 +1140,17 @@ function render() {
     const pct = Math.max(0, Math.min(100, Number(status.levelPercent) || 0));
     $("stLevel").textContent = fmtDb(toDb(pct)) + " dB";
     $("stLevelDb").textContent = status.levelDb > -119 ? "RMS " + fmtDb(status.levelDb) + " dBFS" : "Silent";
-    $("stPackets").textContent = Number(status.packetsSent).toLocaleString();
-    $("stPacketsSub").textContent = (status.packetMs > 0 ? Math.round(1000 / status.packetMs) : 50) + " per second while sending" +
-      (status.rtpCodec ? ", " + status.rtpCodec + " " + (status.rtpRate / 1000) + " kHz" : "");
-    $("stErrors").textContent = Number(status.sendErrors).toLocaleString();
+    const live = liveEdge(), le = status.edge || {};
+    $("stPacketsLabel").textContent = live ? "Edge page" : "Packets sent";
+    $("stPackets").textContent = live ? (le.paging ? "Paging" : "Idle") : Number(status.packetsSent).toLocaleString();
+    $("stPacketsSub").textContent = live
+      ? (le.paging ? (le.confirmed === 1 ? "Confirmed by Edge" : le.confirmed === 0 ? "Edge isn't paging" : "Waiting for Edge") : "No RTP is sent")
+      : (status.packetMs > 0 ? Math.round(1000 / status.packetMs) : 50) + " per second while sending" +
+        (status.rtpCodec ? ", " + status.rtpCodec + " " + (status.rtpRate / 1000) + " kHz" : "");
+    $("stErrorsLabel").textContent = live ? "Edge rule" : "Send errors";
+    $("stErrors").textContent = live ? ({ ok: "In place", changed: "Changed", missing: "Missing" }[le.rule] || "—")
+      : Number(status.sendErrors).toLocaleString();
+    $("stErrorsSub").textContent = live ? (le.lineIn === 1 ? "Line-in recipient found" : le.lineIn === 0 ? "No Line-in recipient" : "") : "Since start";
     $("stDropped").textContent = Number(status.samplesDropped).toLocaleString();
     $("stCapture").textContent = status.nodeConnected ? (status.captureRate / 1000) + " kHz" : "Waiting";
     $("stCaptureSub").textContent = status.nodeConnected ? status.captureChannels + " ch · " + status.connectedNode : status.inputNode;
@@ -1016,7 +1173,7 @@ function render() {
 function renderHint(H, c) {
   const recent = H.slice(-Math.round(10000 / iv)).map((p) => p.v || 0);   /* last 10 s */
   let hint = null;
-  if (recent.length >= 3000 / iv && status && status.nodeConnected && !status.testMode) {
+  if (recent.length >= 3000 / iv && status && status.nodeConnected && !(status.testMode && !liveEdge())) {
     const maxV = Math.max.apply(null, recent);
     const maxDb = toDb(maxV);
     const isMic = audioInput.type === "mic", isLine = audioInput.type === "line";
@@ -1033,7 +1190,7 @@ function renderHint(H, c) {
     }
     /* The quietest tenth of the last 10 s is the noise floor. A closing level
        at or under it means the input never counts as quiet. */
-    if (!hint && c && c.mode === "auto" && c.trigger === "level") {
+    if (!hint && c && (c.mode === "auto" || (c.mode === "test" && effMode(c) === "edge")) && c.trigger === "level") {
       const dbs = recent.map(toDb).sort((a, b) => a - b);
       const floorDb = dbs[Math.floor(dbs.length * 0.1)];
       if (releaseDb(c) <= floorDb + 3) {
@@ -1140,6 +1297,7 @@ async function save() {
       deactivationDelayS: c.hold, maxOnS: c.maxOn, inputNode: c.node,
       codec: c.codec === "pcma" ? "pcma" : "l16", sampleRate: c.codec === "l16-16000" ? 16000 : 48000, payloadType: c.pt
     };
+    if (status && status.manager) body.manager = c.manager;   /* apps before 1.8.0 don't have the setting */
     const r = await fetchWithTimeout("api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, SAVE_TIMEOUT_MS);
     const data = await r.json().catch(() => ({}));
     if (!r.ok || !data.ok) throw new Error(data.error || "Save failed (HTTP " + r.status + ")");
@@ -1169,6 +1327,7 @@ async function save() {
   }
 }
 
+document.querySelectorAll("#managers button").forEach((b) => b.addEventListener("click", () => setDraft("manager", b.dataset.v)));
 document.querySelectorAll("#modes button").forEach((b) => b.addEventListener("click", () => setDraft("mode", b.dataset.v)));
 document.querySelectorAll("#triggers button").forEach((b) => b.addEventListener("click", () => setDraft("trigger", b.dataset.v)));
 document.querySelectorAll("#codecs button").forEach((b) => b.addEventListener("click", () => setDraft("codec", b.dataset.v)));
@@ -1211,6 +1370,10 @@ $("thrGrab").addEventListener("keydown", nudge);
 $("relGrab").addEventListener("keydown", nudge);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && drag) endDrag(true); });
 $("ip").addEventListener("input", (e) => setDraft("ip", e.target.value.trim()));
+$("useProServer").addEventListener("click", () => {
+  const ip = (status && status.detect && status.detect.proServer) || "";
+  if (validIp(ip)) { $("ip").value = ip; setDraft("ip", ip); }
+});
 /* A port that isn't 1-65535 stays in the box with an error and blocks Save,
    instead of being silently ignored. */
 $("port").addEventListener("input", (e) => {
